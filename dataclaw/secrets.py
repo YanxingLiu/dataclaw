@@ -23,11 +23,27 @@ SECRET_PATTERNS = [
     # OpenAI API keys
     ("openai_key", re.compile(r"sk-[A-Za-z0-9]{40,}")),
 
+    # Google API keys (Gemini, Maps, etc.)
+    ("google_api_key", re.compile(r"AIzaSy[A-Za-z0-9_-]{33}")),
+
+    # Groq API keys
+    ("groq_key", re.compile(r"gsk_[A-Za-z0-9]{20,}")),
+
+    # Telegram bot tokens
+    ("telegram_token", re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b")),
+
+    # Fly.io machine/access tokens
+    ("flyio_token", re.compile(r"fm[12]_[A-Za-z0-9/+=]{20,}")),
+
+    # Ethereum / EVM private keys (0x + 64 hex chars)
+    ("eth_private_key", re.compile(r"0x[0-9a-fA-F]{64}\b")),
+
     # Hugging Face tokens
     ("hf_token", re.compile(r"hf_[A-Za-z0-9]{20,}")),
 
     # GitHub tokens
     ("github_token", re.compile(r"(?:ghp|gho|ghs|ghr)_[A-Za-z0-9]{30,}")),
+    ("github_pat_token", re.compile(r"github_pat_[A-Za-z0-9]{22,}_[A-Za-z0-9]{59,}")),
 
     # PyPI tokens
     ("pypi_token", re.compile(r"pypi-[A-Za-z0-9_-]{50,}")),
@@ -38,9 +54,9 @@ SECRET_PATTERNS = [
     # AWS access key IDs (but not in regex pattern context)
     ("aws_key", re.compile(r"(?<![A-Za-z0-9\[])AKIA[0-9A-Z]{16}(?![0-9A-Z\]{}])")),
 
-    # AWS secret keys (40 chars, mixed case + special)
+    # AWS secret keys (40 chars, mixed case + special) — allow suffixed names like _GUTENBERG
     ("aws_secret", re.compile(
-        r"(?:aws_secret_access_key|secret_key)\s*[=:]\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?",
+        r"(?:aws_secret_access_key\w*|secret_key)\s*[=:]\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?",
         re.IGNORECASE,
     )),
 
@@ -69,22 +85,23 @@ SECRET_PATTERNS = [
     # Environment variable assignments with secret-like names (with or without quotes)
     ("env_secret", re.compile(
         r"(?:SECRET|PASSWORD|TOKEN|API_KEY|AUTH_KEY|ACCESS_KEY|SERVICE_KEY|DB_PASSWORD"
-        r"|SUPABASE_KEY|SUPABASE_SERVICE|ANON_KEY|SERVICE_ROLE)"
+        r"|SUPABASE_KEY|SUPABASE_SERVICE|ANON_KEY|SERVICE_ROLE|PRIVATE_KEY)"
         r"\s*[=]\s*['\"]?([^\s'\"]{6,})['\"]?",
         re.IGNORECASE,
     )),
 
-    # Generic secret assignments: SECRET_KEY = "value", api_key: "value", etc.
+    # Generic secret assignments: SECRET_KEY = "value", "api_key": "value", etc.
+    # The ['"]? after the key name handles JSON-quoted keys like "apiKey": "value"
     ("generic_secret", re.compile(
         r"""(?:secret[_-]?key|api[_-]?key|api[_-]?secret|access[_-]?token|auth[_-]?token"""
-        r"""|service[_-]?role[_-]?key|private[_-]?key)"""
-        r"""\s*[=:]\s*['"]([A-Za-z0-9_/+=.-]{20,})['"]""",
+        r"""|service[_-]?role[_-]?key|private[_-]?key|\btoken)"""
+        r"""['"]?\s*[=:]\s*['"]([A-Za-z0-9_/+=.-]{16,})['"]""",
         re.IGNORECASE,
     )),
 
-    # Bearer tokens in headers
+    # Bearer tokens in headers (JWT and non-JWT)
     ("bearer", re.compile(
-        r"Bearer\s+(eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,})"
+        r"Bearer\s+([A-Za-z0-9_/+=.-]{20,})"
     )),
 
     # IP addresses (public, non-loopback, non-private-by-default)
@@ -94,10 +111,16 @@ SECRET_PATTERNS = [
         r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b"
     )),
 
-    # URL query params with secrets: ?key=VALUE, &token=VALUE, etc.
+    # URL query params with secrets: ?key=VALUE, &api-key=VALUE, etc.
     ("url_token", re.compile(
-        r"[?&](?:key|token|secret|password|apikey|api_key|access_token|auth)"
+        r"[?&](?:key|token|secret|password|apikey|api[_-]key|access[_-]token|auth)"
         r"=([A-Za-z0-9_/+=.-]{8,})",
+        re.IGNORECASE,
+    )),
+
+    # Passwords pasted after a keyword (English/Chinese), on same or next line
+    ("password_value", re.compile(
+        r"(?:password|passwd|密码)\s*[=:]?\s*\n?\s*([A-Za-z0-9_/+=.-]{16,})\b",
         re.IGNORECASE,
     )),
 
