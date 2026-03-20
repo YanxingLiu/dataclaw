@@ -1216,7 +1216,14 @@ def _build_codex_tool_result_map(entries: list[dict[str, Any]], anonymizer: Anon
             raw = p.get("output", "")
             # Parse "Exit code: N\nWall time: ...\nOutput:\n..." format
             out: dict = {}
-            lines = raw.splitlines()
+            if isinstance(raw, list):
+                lines = [str(item) for item in raw]
+            elif isinstance(raw, str):
+                lines = raw.splitlines()
+            elif raw:
+                lines = str(raw).splitlines()
+            else:
+                lines = []
             output_lines: list[str] = []
             in_output = False
             for line in lines:

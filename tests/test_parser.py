@@ -1236,6 +1236,28 @@ class TestBuildCodexToolResultMap:
         assert result["call-1"]["output"]["wall_time"] == "1 seconds"
         assert "hello world" in result["call-1"]["output"]["output"]
 
+    def test_function_call_output_list_payload(self, mock_anonymizer):
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-list",
+                    "output": [
+                        "Exit code: 0",
+                        "Wall time: 1 seconds",
+                        "Output:",
+                        "hello from list payload",
+                    ],
+                },
+            }
+        ]
+        result = _build_codex_tool_result_map(entries, mock_anonymizer)
+        assert "call-list" in result
+        assert result["call-list"]["output"]["exit_code"] == 0
+        assert result["call-list"]["output"]["wall_time"] == "1 seconds"
+        assert "hello from list payload" in result["call-list"]["output"]["output"]
+
     def test_custom_tool_call_output(self, mock_anonymizer):
         import json as _json
         entries = [
