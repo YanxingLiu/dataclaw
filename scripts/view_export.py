@@ -7,7 +7,12 @@ from typing import Any
 
 import streamlit as st
 
-from dataclaw.viewer import clamp_index, load_sessions
+from dataclaw.viewer import (
+    clamp_index,
+    filter_sessions_by_model,
+    get_model_options,
+    load_sessions,
+)
 
 
 DEFAULT_EXPORT = Path(__file__).resolve().parents[1] / "dataclaw_conversations.jsonl"
@@ -81,13 +86,29 @@ def main() -> None:
         st.stop()
 
     sessions = load_sessions(export_path)
-    total = len(sessions)
-    if total == 0:
+    if not sessions:
         st.warning("No sessions found in this export file.")
+        st.stop()
+
+    model_options = ["All models", *get_model_options(sessions)]
+    selected_model = st.selectbox(
+        "Model",
+        options=model_options,
+        index=0,
+        help="Type to search model names and filter the session list.",
+    )
+    model_filter = None if selected_model == "All models" else selected_model
+
+    filtered_sessions = filter_sessions_by_model(sessions, model_filter)
+    total = len(filtered_sessions)
+    if total == 0:
+        st.warning("No sessions match the selected model.")
         st.stop()
 
     if "session_index" not in st.session_state:
         st.session_state.session_index = clamp_index(args.index, total)
+    else:
+        st.session_state.session_index = clamp_index(int(st.session_state.session_index), total)
 
     current = clamp_index(int(st.session_state.session_index), total)
 
@@ -109,24 +130,35 @@ def main() -> None:
             step=1,
         )
     with controls[3]:
-        session_id_query = st.text_input("Session ID", value=str(sessions[current].get("session_id", "")))
+        session_id_query = st.text_input(
+            "Session ID",
+            value=str(filtered_sessions[current].get("session_id", "")),
+            help="Jump to a session ID within the current filtered results.",
+        )
 
     selected = clamp_index(int(selected), total)
     if selected != current:
         st.session_state.session_index = selected
         st.rerun()
 
-    if session_id_query and session_id_query != str(sessions[current].get("session_id", "")):
+    if session_id_query and session_id_query != str(filtered_sessions[current].get("session_id", "")):
         match_index = next(
-            (idx for idx, item in enumerate(sessions) if str(item.get("session_id", "")) == session_id_query),
+            (
+                idx
+                for idx, item in enumerate(filtered_sessions)
+                if str(item.get("session_id", "")) == session_id_query
+            ),
             None,
         )
         if match_index is not None:
             st.session_state.session_index = match_index
             st.rerun()
 
-    session = sessions[st.session_state.session_index]
+    session = filtered_sessions[st.session_state.session_index]
     messages = session.get("messages", [])
+
+    if model_filter:
+        st.caption(f"Showing {total} sessions for model `{model_filter}`")
 
     st.subheader(f"Row {st.session_state.session_index + 1} of {total}")
 
