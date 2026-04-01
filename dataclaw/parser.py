@@ -938,7 +938,7 @@ def _parse_gemini_tool_call(tc: dict, anonymizer: Anonymizer) -> dict:
             try:
                 parsed["exit_code"] = int(parsed["exit_code"])
             except ValueError:
-                pass
+                parsed["exit_code"] = anonymizer.text(parsed["exit_code"])
         if "command" in parsed:
             parsed["command"] = anonymizer.text(parsed["command"])
         if "directory" in parsed:
