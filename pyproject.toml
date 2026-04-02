@@ -1,13 +1,14 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "dataclaw"
-version = "0.3.2"
+version = "0.4.0"
 description = "Export your coding agent conversations to Hugging Face as structured data"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 readme = "README.md"
 authors = [
     {name = "Banodoco"},
@@ -17,11 +18,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Archiving",
 ]
 dependencies = [
     "huggingface_hub>=0.35.0",
@@ -43,7 +40,7 @@ dev = ["pre-commit", "pytest", "ruff"]
 line-length = 120
 
 [tool.ruff.lint]
-extend-select = ["F401", "I"]
+extend-select = ["I"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["F401"]
