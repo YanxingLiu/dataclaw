@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -176,14 +176,24 @@ def sum_existing_path_sizes(paths: Iterable[Path]) -> int:
     return sum(path.stat().st_size for path in paths if path.exists())
 
 
+def count_existing_paths_and_sizes(paths: Iterable[Path]) -> tuple[int, int]:
+    count = 0
+    total_size = 0
+    for path in paths:
+        if not path.exists():
+            continue
+        count += 1
+        total_size += path.stat().st_size
+    return count, total_size
+
+
 def collect_project_sessions(
     items: Iterable[Any],
     parse_item: Callable[[Any], dict | None],
     project_name: str,
     source: str,
     default_model: str | None = None,
-) -> list[dict]:
-    sessions = []
+) -> Iterator[dict]:
     for item in items:
         parsed = parse_item(item)
         if not parsed or not parsed.get("messages"):
@@ -192,5 +202,4 @@ def collect_project_sessions(
         parsed["source"] = source
         if default_model and not parsed.get("model"):
             parsed["model"] = default_model
-        sessions.append(parsed)
-    return sessions
+        yield parsed

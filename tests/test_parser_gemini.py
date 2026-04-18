@@ -1,7 +1,24 @@
 """Tests for Gemini parser behavior."""
 
 from dataclaw import _json as json
-from dataclaw.parsers.gemini import parse_session_file
+from dataclaw.parsers.gemini import discover_projects, parse_session_file
+
+
+class TestDiscoverGeminiProjects:
+    def test_discovers_sessions_without_materializing_file_list(self, tmp_path, monkeypatch):
+        gemini_dir = tmp_path / "tmp"
+        chats_dir = gemini_dir / "project-hash" / "chats"
+        chats_dir.mkdir(parents=True)
+        (chats_dir / "session-1.json").write_text("{}", encoding="utf-8")
+        (chats_dir / "session-2.json").write_text("{}", encoding="utf-8")
+
+        monkeypatch.setattr("dataclaw.parsers.gemini.GEMINI_DIR", gemini_dir)
+
+        projects = discover_projects(resolve_hash_fn=lambda _hash: "resolved-project")
+
+        assert len(projects) == 1
+        assert projects[0]["display_name"] == "gemini:resolved-project"
+        assert projects[0]["session_count"] == 2
 
 
 class TestParseGeminiUserContentParts:
@@ -208,3 +225,32 @@ class TestParseGeminiUserContentParts:
         assert "content" not in message
         assert message["content_parts"] == [{"type": "text", "text": blob}]
         assert result["stats"]["user_messages"] == 1
+
+    def test_multi_mb_inline_data_preserved_verbatim(self, tmp_path, mock_anonymizer):
+        blob = "A" * (2 * 1024 * 1024)
+        session_file = tmp_path / "session-gemini.json"
+        session_file.write_text(
+            json.dumps(
+                {
+                    "sessionId": "gemini-session-inline-large",
+                    "startTime": "2026-03-24T12:00:00Z",
+                    "lastUpdated": "2026-03-24T12:00:01Z",
+                    "messages": [
+                        {
+                            "type": "user",
+                            "timestamp": "2026-03-24T12:00:00Z",
+                            "content": [
+                                {"inlineData": {"mimeType": "image/png", "data": blob}},
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = parse_session_file(session_file, mock_anonymizer)
+
+        assert result is not None
+        message = result["messages"][0]
+        assert message["content_parts"][0]["source"]["data"] == blob

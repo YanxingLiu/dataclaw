@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dataclaw import _json as json
 from dataclaw._cli.exporting import _build_dataset_card, export_to_jsonl, push_to_huggingface, summarize_export_jsonl
 
 
@@ -152,6 +153,31 @@ class TestExportToJsonl:
         }
         assert meta["project_breakdown"] == {"test": {"sessions": 1, "input_tokens": 100, "output_tokens": 50}}
 
+    def test_prints_per_project_elapsed_and_tokens_when_available(self, tmp_path, mock_anonymizer, monkeypatch, capsys):
+        output = tmp_path / "out.jsonl"
+        perf_counter_values = iter([10.0, 11.25])
+        session_data = [
+            {
+                "session_id": "s1",
+                "model": "claude-sonnet-4-20250514",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stats": {"input_tokens": 12, "output_tokens": 34},
+                "project": "test",
+            }
+        ]
+
+        monkeypatch.setattr("dataclaw._cli.exporting.time.perf_counter", lambda: next(perf_counter_values))
+
+        export_to_jsonl(
+            [{"dir_name": "test", "display_name": "test"}],
+            output,
+            mock_anonymizer,
+            parse_project_sessions_fn=lambda *args, **kwargs: session_data,
+            default_source="claude",
+        )
+
+        assert "Parsing test... 1 sessions in 1.25s (12 input / 34 output tokens)" in capsys.readouterr().out
+
     def test_normalizes_stats_without_changing_dataset_rows(self, tmp_path, mock_anonymizer):
         output = tmp_path / "out.jsonl"
         session_data = [
@@ -221,6 +247,32 @@ class TestExportToJsonl:
             default_source="claude",
         )
         assert meta["redactions"] >= 1
+
+    def test_accepts_session_iterators(self, tmp_path, mock_anonymizer):
+        output = tmp_path / "out.jsonl"
+        projects = [{"dir_name": "test", "display_name": "test"}]
+
+        def iter_sessions(*args, **kwargs):
+            del args, kwargs
+            yield {
+                "session_id": "s1",
+                "model": "claude-sonnet-4-20250514",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stats": {"input_tokens": 10, "output_tokens": 5},
+                "project": "test",
+            }
+
+        meta = export_to_jsonl(
+            projects,
+            output,
+            mock_anonymizer,
+            parse_project_sessions_fn=iter_sessions,
+            default_source="claude",
+        )
+
+        assert output.exists()
+        assert output.read_text().count("\n") == 1
+        assert meta["sessions"] == 1
 
     def test_skips_none_model(self, tmp_path, mock_anonymizer):
         output = tmp_path / "out.jsonl"
@@ -304,6 +356,83 @@ class TestExportToJsonl:
         lines = output.read_text().strip().split("\n")
         assert len(lines) == 2
         assert meta["sessions"] == 2
+
+    def test_dedupes_gemini_sessions_with_different_dict_insertion_order(self, tmp_path, mock_anonymizer):
+        output = tmp_path / "out.jsonl"
+        session_a = {
+            "session_id": "g1",
+            "model": "gemini-2.5-pro",
+            "git_branch": None,
+            "start_time": "2026-01-01T00:00:00Z",
+            "end_time": "2026-01-01T00:01:00Z",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stats": {"input_tokens": 1, "output_tokens": 2},
+            "project": "gemini:ComfyUI",
+            "source": "gemini",
+        }
+        session_b = {
+            "source": "gemini",
+            "project": "gemini:comfyui",
+            "stats": {"output_tokens": 2, "input_tokens": 1},
+            "messages": [{"content": "hi", "role": "user"}],
+            "end_time": "2026-01-01T00:01:00Z",
+            "start_time": "2026-01-01T00:00:00Z",
+            "git_branch": None,
+            "model": "gemini-2.5-pro",
+            "session_id": "g1",
+        }
+        projects = [{"dir_name": "proj", "display_name": "gemini:comfyui", "source": "gemini"}]
+
+        meta = export_to_jsonl(
+            projects,
+            output,
+            mock_anonymizer,
+            parse_project_sessions_fn=lambda *args, **kwargs: [session_a, session_b],
+            default_source="gemini",
+        )
+
+        lines = output.read_text().strip().split("\n")
+        assert len(lines) == 1
+        assert meta["sessions"] == 1
+
+    def test_writes_multi_mb_blob_verbatim(self, tmp_path, mock_anonymizer):
+        output = tmp_path / "out.jsonl"
+        blob = "A" * (2 * 1024 * 1024)
+        session_data = [
+            {
+                "session_id": "g-large",
+                "model": "gemini-2.5-pro",
+                "git_branch": None,
+                "start_time": "2026-01-01T00:00:00Z",
+                "end_time": "2026-01-01T00:01:00Z",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content_parts": [
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/png", "data": blob},
+                            }
+                        ],
+                    }
+                ],
+                "stats": {"input_tokens": 1, "output_tokens": 2},
+                "project": "gemini:proj",
+                "source": "gemini",
+            }
+        ]
+
+        meta = export_to_jsonl(
+            [{"dir_name": "proj", "display_name": "gemini:proj", "source": "gemini"}],
+            output,
+            mock_anonymizer,
+            parse_project_sessions_fn=lambda *args, **kwargs: session_data,
+            default_source="gemini",
+        )
+
+        rows = [json.loads(line) for line in output.read_bytes().splitlines() if line.strip()]
+        assert meta["sessions"] == 1
+        assert rows[0]["messages"][0]["content_parts"][0]["source"]["data"] == blob
 
 
 class TestPushToHuggingface:

@@ -2,6 +2,7 @@ import hashlib
 import logging
 import os
 from collections import defaultdict, deque
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,6 +12,7 @@ from ..secrets import should_skip_large_binary_string
 from .common import (
     anonymize_value,
     collect_project_sessions,
+    count_existing_paths_and_sizes,
     make_session_result,
     make_stats,
     parse_tool_input,
@@ -54,7 +56,8 @@ def extract_project_path_from_sessions(project_hash: str, gemini_dir: Path) -> s
 
     for session_file in sorted(chats_dir.glob("session-*.json"), reverse=True):
         try:
-            data = json.loads(session_file.read_text())
+            with open(session_file, "rb") as f:
+                data = json.load(f)
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse JSON in %s: %s", session_file, e)
             continue
@@ -136,15 +139,15 @@ def discover_projects(
         chats_dir = project_dir / "chats"
         if not chats_dir.exists():
             continue
-        sessions = list(chats_dir.glob("session-*.json"))
-        if not sessions:
+        session_count, total_size = count_existing_paths_and_sizes(chats_dir.glob("session-*.json"))
+        if session_count == 0:
             continue
         projects.append(
             {
                 "dir_name": project_dir.name,
                 "display_name": build_project_name(project_dir.name, resolve_hash_fn),
-                "session_count": len(sessions),
-                "total_size_bytes": sum(f.stat().st_size for f in sessions),
+                "session_count": session_count,
+                "total_size_bytes": total_size,
                 "source": SOURCE,
             }
         )
@@ -155,10 +158,10 @@ def parse_project_sessions(
     project_dir_name: str,
     anonymizer: Anonymizer,
     include_thinking: bool = True,
-) -> list[dict]:
+) -> Iterable[dict]:
     project_path = GEMINI_DIR / project_dir_name / "chats"
     if not project_path.exists():
-        return []
+        return ()
 
     return collect_project_sessions(
         sorted(project_path.glob("session-*.json")),
@@ -436,7 +439,7 @@ def parse_session_file(
     include_thinking: bool = True,
 ) -> dict | None:
     try:
-        with open(filepath) as f:
+        with open(filepath, "rb") as f:
             data = json.load(f)
     except json.JSONDecodeError as e:
         logger.warning("Failed to parse JSON in %s: %s", filepath, e)

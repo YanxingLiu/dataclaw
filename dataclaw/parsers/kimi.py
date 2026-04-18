@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,8 @@ def load_work_dirs(config_path: Path) -> dict[str, str]:
     if not config_path.exists():
         return {}
     try:
-        data = json.loads(config_path.read_text())
+        with open(config_path, "rb") as f:
+            data = json.load(f)
         work_dirs = data.get("work_dirs", [])
         return {entry.get("path", ""): entry.get("path", "") for entry in work_dirs if entry.get("path")}
     except (json.JSONDecodeError, OSError) as e:
@@ -105,11 +107,11 @@ def parse_project_sessions(
     project_dir_name: str,
     anonymizer: Anonymizer,
     include_thinking: bool = True,
-) -> list[dict]:
+) -> Iterable[dict]:
     project_hash = get_project_hash(project_dir_name)
     project_path = KIMI_SESSIONS_DIR / project_hash
     if not project_path.exists():
-        return []
+        return ()
 
     context_files = []
     for session_dir in sorted(project_path.iterdir()):

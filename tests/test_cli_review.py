@@ -1,11 +1,14 @@
 """Tests for CLI review helpers."""
 
+import json
+
 from dataclaw._cli.review import (
     _collect_review_attestations,
     _scan_for_text_occurrences,
     _scan_high_entropy_strings,
     _scan_pii,
     _validate_publish_attestation,
+    confirm,
 )
 
 
@@ -177,6 +180,11 @@ class TestScanHighEntropyStrings:
         results = _scan_high_entropy_strings(content)
         assert not any("node_modules" in result["match"] for result in results)
 
+    def test_filters_very_large_base64_like_blob(self):
+        blob = "AbC123+/" * 700
+        results = _scan_high_entropy_strings(f"payload={blob}")
+        assert not any(result["match"] == blob for result in results)
+
 
 class TestScanPiiHighEntropy:
     def test_includes_high_entropy_when_present(self, tmp_path):
@@ -192,3 +200,63 @@ class TestScanPiiHighEntropy:
         f.write_text('{"message": "nothing suspicious here at all"}\n')
         results = _scan_pii(f)
         assert "high_entropy_strings" not in results
+
+    def test_streams_blob_heavy_exports_without_read_text(self, tmp_path, monkeypatch):
+        blob = "AbC123+/" * (2 * 1024 * 1024 // 8)
+        f = tmp_path / "export.jsonl"
+        f.write_text(
+            f'{{"message": "{blob}"}}\n{{"message": "contact jane@example.com"}}\n',
+            encoding="utf-8",
+        )
+
+        def fail_read_text(*args, **kwargs):
+            raise AssertionError("Path.read_text should not be called")
+
+        monkeypatch.setattr("pathlib.Path.read_text", fail_read_text)
+
+        results = _scan_pii(f)
+
+        assert results["emails"] == ["jane@example.com"]
+        assert "high_entropy_strings" not in results
+
+
+class TestConfirmStreaming:
+    def test_confirm_reviews_export_in_single_pass(self, tmp_path, monkeypatch, capsys):
+        export_file = tmp_path / "export.jsonl"
+        export_file.write_text(
+            '{"project":"proj-a","model":"model-a","message":"Jane Doe","messages":[]}\n'
+            '{"project":"proj-b","model":"model-b","message":"contact jane@example.com","messages":[]}\n',
+            encoding="utf-8",
+        )
+
+        open_calls = 0
+        real_open = open
+
+        def counting_open(file, *args, **kwargs):
+            nonlocal open_calls
+            if str(file) == str(export_file):
+                open_calls += 1
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", counting_open)
+
+        saved_config = {}
+        confirm(
+            file_path=export_file,
+            full_name="Jane Doe",
+            attest_asked_full_name="I asked Jane Doe for their full name and scanned the export for Jane Doe.",
+            attest_asked_sensitive=(
+                "I asked about company, client, and internal names plus URLs; "
+                "none were sensitive and no extra redactions were needed."
+            ),
+            attest_manual_scan="I performed a manual scan and reviewed 20 sessions across beginning, middle, and end.",
+            load_config_fn=lambda: {},
+            save_config_fn=lambda cfg: saved_config.update(cfg),
+        )
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["total_sessions"] == 2
+        assert payload["full_name_scan"]["match_count"] == 1
+        assert payload["pii_scan"]["emails"] == ["jane@example.com"]
+        assert open_calls == 1
+        assert saved_config["stage"] == "confirmed"

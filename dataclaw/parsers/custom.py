@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 
 from .. import _json as json
@@ -21,17 +22,18 @@ def discover_projects(custom_dir: Path | None = None) -> list[dict]:
     for project_dir in sorted(custom_dir.iterdir()):
         if not project_dir.is_dir():
             continue
-        jsonl_files = list(project_dir.glob("*.jsonl"))
-        if not jsonl_files:
-            continue
+        saw_file = False
         session_count = 0
         total_size = 0
-        for jsonl_file in jsonl_files:
+        for jsonl_file in sorted(project_dir.glob("*.jsonl")):
+            saw_file = True
             total_size += jsonl_file.stat().st_size
             try:
                 session_count += sum(1 for line in jsonl_file.open() if line.strip())
             except OSError as e:
                 logger.warning("Failed to read %s: %s", jsonl_file, e)
+        if not saw_file:
+            continue
         if session_count == 0:
             continue
         projects.append(
@@ -51,15 +53,14 @@ def parse_project_sessions(
     anonymizer: Anonymizer,
     include_thinking: bool = True,
     custom_dir: Path | None = None,
-) -> list[dict]:
+) -> Iterable[dict]:
     if custom_dir is None:
         custom_dir = CUSTOM_DIR
     project_path = custom_dir / project_dir_name
     if not project_path.exists():
-        return []
+        return
 
     required_fields = {"session_id", "model", "messages"}
-    sessions = []
     for jsonl_file in sorted(project_path.glob("*.jsonl")):
         try:
             for line_num, line in enumerate(jsonl_file.open(), 1):
@@ -100,16 +101,17 @@ def parse_project_sessions(
                     if "content" in msg and isinstance(msg["content"], str):
                         redacted, _ = redact_text(msg["content"])
                         msg["content"] = anonymizer.text(redacted)
-                sessions.append(session)
+                yield session
         except OSError:
             logger.warning("custom:%s: failed to read %s", project_dir_name, jsonl_file.name)
-    return sessions
 
 
 def parse_sessions(project_dir_name: str, custom_dir: Path, anonymizer: Anonymizer) -> list[dict]:
-    return parse_project_sessions(
-        project_dir_name,
-        anonymizer,
-        include_thinking=True,
-        custom_dir=custom_dir,
+    return list(
+        parse_project_sessions(
+            project_dir_name,
+            anonymizer,
+            include_thinking=True,
+            custom_dir=custom_dir,
+        )
     )

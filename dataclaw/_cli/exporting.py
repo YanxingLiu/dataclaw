@@ -1,12 +1,13 @@
 """Export and publish helpers for the DataClaw CLI."""
 
 import hashlib
-import json as std_json
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from .. import _json as json
 from ..anonymizer import Anonymizer
@@ -18,6 +19,10 @@ def _token_totals(stats: object) -> tuple[int, int]:
     if not isinstance(stats, dict):
         return 0, 0
     return stats.get("input_tokens", 0), stats.get("output_tokens", 0)
+
+
+def _format_elapsed_seconds(seconds: float) -> str:
+    return f"{seconds:.2f}s"
 
 
 def _normalize_model_stats_key(key: object) -> str | None:
@@ -67,15 +72,65 @@ def _add_breakdown_row(
     row["output_tokens"] += output_tokens
 
 
+def _update_hash_bytes(hasher, marker: bytes, data: bytes) -> None:
+    hasher.update(marker)
+    hasher.update(str(len(data)).encode("ascii"))
+    hasher.update(b":")
+    hasher.update(data)
+    hasher.update(b";")
+
+
+def _update_hash_value(hasher, value: Any) -> None:
+    if value is None:
+        hasher.update(b"n;")
+        return
+    if value is True:
+        hasher.update(b"t;")
+        return
+    if value is False:
+        hasher.update(b"f;")
+        return
+    if isinstance(value, str):
+        _update_hash_bytes(hasher, b"s", value.encode("utf-8"))
+        return
+    if isinstance(value, int):
+        _update_hash_bytes(hasher, b"i", str(value).encode("ascii"))
+        return
+    if isinstance(value, float):
+        _update_hash_bytes(hasher, b"f", json.dumps_bytes(value))
+        return
+    if isinstance(value, list):
+        hasher.update(b"[")
+        for item in value:
+            _update_hash_value(hasher, item)
+        hasher.update(b"]")
+        return
+    if isinstance(value, dict):
+        hasher.update(b"{")
+        for key in sorted(value, key=str):
+            _update_hash_bytes(hasher, b"k", str(key).encode("utf-8"))
+            _update_hash_value(hasher, value[key])
+        hasher.update(b"}")
+        return
+    _update_hash_bytes(hasher, b"j", json.dumps_bytes(value))
+
+
 def _gemini_dedupe_fingerprint(session: dict, source: str) -> str | None:
     if source != "gemini":
         return None
 
-    canonical = dict(session)
-    canonical["source"] = source
-    canonical.pop("project", None)
-    payload = std_json.dumps(canonical, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode()).hexdigest()
+    hasher = hashlib.sha256()
+    hasher.update(b"gemini-dedupe:v1;")
+    hasher.update(b"{")
+    for key in sorted(session, key=str):
+        if key == "project":
+            continue
+        _update_hash_bytes(hasher, b"k", str(key).encode("utf-8"))
+        _update_hash_value(hasher, session[key])
+    _update_hash_bytes(hasher, b"k", b"source")
+    _update_hash_value(hasher, source)
+    hasher.update(b"}")
+    return hasher.hexdigest()
 
 
 def export_to_jsonl(
@@ -105,6 +160,7 @@ def export_to_jsonl(
     with fh as f:
         for project in selected_projects:
             print(f"  Parsing {project['display_name']}...", end="", flush=True)
+            project_start_time = time.perf_counter()
             sessions = parse_project_sessions_fn(
                 project["dir_name"],
                 anonymizer=anonymizer,
@@ -112,6 +168,9 @@ def export_to_jsonl(
                 source=project.get("source", default_source),
             )
             proj_count = 0
+            project_input_tokens = 0
+            project_output_tokens = 0
+            project_has_token_stats = False
             for session in sessions:
                 source = session.get("source") or project.get("source", default_source)
                 model = session.get("model")
@@ -133,7 +192,12 @@ def export_to_jsonl(
                 f.write(b"\n")
                 total += 1
                 proj_count += 1
-                input_tokens, output_tokens = _token_totals(session.get("stats", {}))
+                stats = session.get("stats", {})
+                input_tokens, output_tokens = _token_totals(stats)
+                if isinstance(stats, dict) and ("input_tokens" in stats or "output_tokens" in stats):
+                    project_has_token_stats = True
+                project_input_tokens += input_tokens
+                project_output_tokens += output_tokens
                 total_input_tokens += input_tokens
                 total_output_tokens += output_tokens
                 _add_breakdown_row(
@@ -148,7 +212,14 @@ def export_to_jsonl(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                 )
-            print(f" {proj_count} sessions")
+            project_elapsed = time.perf_counter() - project_start_time
+            token_summary = ""
+            if project_has_token_stats:
+                token_summary = (
+                    f" ({_format_token_count(project_input_tokens)} input / "
+                    f"{_format_token_count(project_output_tokens)} output tokens)"
+                )
+            print(f" {proj_count} sessions in {_format_elapsed_seconds(project_elapsed)}{token_summary}")
 
     return {
         "sessions": total,
@@ -477,18 +548,18 @@ def update_skill(target: str) -> None:
     print(f"Downloading skill from {SKILL_URL}...")
     try:
         with urllib.request.urlopen(SKILL_URL, timeout=15) as resp:
-            content = resp.read().decode()
+            content = resp.read()
     except (OSError, urllib.error.URLError) as e:
         print(f"Error downloading skill: {e}", file=sys.stderr)
         bundled = Path(__file__).resolve().parent.parent.parent / ".claude" / "skills" / "dataclaw" / "SKILL.md"
         if bundled.exists():
             print(f"Using bundled copy from {bundled}")
-            content = bundled.read_text()
+            content = bundled.read_bytes()
         else:
             print("No bundled copy available either.", file=sys.stderr)
             sys.exit(1)
 
-    dest.write_text(content)
+    dest.write_bytes(content)
     print(f"Skill installed to {dest}")
     print(
         json.dumps(

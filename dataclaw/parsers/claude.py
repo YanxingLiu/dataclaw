@@ -1,4 +1,6 @@
+import heapq
 import re
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -7,12 +9,12 @@ from ..secrets import should_skip_large_binary_string
 from .common import (
     anonymize_value,
     collect_project_sessions,
+    count_existing_paths_and_sizes,
     iter_jsonl,
     make_session_result,
     make_stats,
     normalize_timestamp,
     parse_tool_input,
-    sum_existing_path_sizes,
     update_time_bounds,
 )
 
@@ -31,25 +33,38 @@ def discover_projects(projects_dir: Path | None = None) -> list[dict]:
     for project_dir in sorted(projects_dir.iterdir()):
         if not project_dir.is_dir():
             continue
-        root_sessions = list(project_dir.glob("*.jsonl"))
-        subagent_sessions = find_subagent_sessions(project_dir)
-        total_count = len(root_sessions) + len(subagent_sessions)
+        root_count, root_size = count_existing_paths_and_sizes(project_dir.glob("*.jsonl"))
+        subagent_count, subagent_size = _discover_subagent_stats(project_dir)
+        total_count = root_count + subagent_count
         if total_count == 0:
             continue
-        total_size = sum_existing_path_sizes(root_sessions)
-        for session_dir in subagent_sessions:
-            for sa_file in (session_dir / "subagents").glob("agent-*.jsonl"):
-                total_size += sa_file.stat().st_size
         projects.append(
             {
                 "dir_name": project_dir.name,
                 "display_name": build_project_name(project_dir.name),
                 "session_count": total_count,
-                "total_size_bytes": total_size,
+                "total_size_bytes": root_size + subagent_size,
                 "source": "claude",
             }
         )
     return projects
+
+
+def _discover_subagent_stats(project_dir: Path) -> tuple[int, int]:
+    session_count = 0
+    total_size = 0
+    for entry in sorted(project_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        subagent_dir = entry / "subagents"
+        if not subagent_dir.is_dir():
+            continue
+        agent_count, agent_size = count_existing_paths_and_sizes(subagent_dir.glob("agent-*.jsonl"))
+        if agent_count == 0:
+            continue
+        session_count += 1
+        total_size += agent_size
+    return session_count, total_size
 
 
 def parse_project_sessions(
@@ -57,33 +72,30 @@ def parse_project_sessions(
     anonymizer: Anonymizer,
     include_thinking: bool = True,
     projects_dir: Path | None = None,
-) -> list[dict]:
+) -> Iterable[dict]:
     if projects_dir is None:
         projects_dir = PROJECTS_DIR
 
     project_path = projects_dir / project_dir_name
     if not project_path.exists():
-        return []
+        return
 
     project_name = build_project_name(project_dir_name)
-    sessions = collect_project_sessions(
+    yield from collect_project_sessions(
         sorted(project_path.glob("*.jsonl")),
         lambda session_file: parse_session_file(session_file, anonymizer, include_thinking),
         project_name,
         SOURCE,
     )
-    sessions.extend(
-        collect_project_sessions(
-            find_subagent_sessions(project_path),
-            lambda session_dir: parse_subagent_session(session_dir, anonymizer, include_thinking),
-            project_name,
-            SOURCE,
-        )
+    yield from collect_project_sessions(
+        find_subagent_sessions(project_path),
+        lambda session_dir: parse_subagent_session(session_dir, anonymizer, include_thinking),
+        project_name,
+        SOURCE,
     )
-    return sessions
 
 
-def build_tool_result_map(entries: list[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, dict]:
+def build_tool_result_map(entries: Iterable[dict[str, Any]], anonymizer: Anonymizer) -> dict[str, dict]:
     """Pre-pass: build a map of tool_use_id -> {output, status} from tool_result blocks."""
     result: dict[str, dict] = {}
     for entry in entries:
@@ -345,23 +357,23 @@ def parse_session_file(
         "end_time": None,
     }
     stats = make_stats()
+    pending_tool_results: dict[str, dict[str, Any]] = {}
+    pending_tool_uses: dict[str, list[dict[str, Any]]] = {}
 
     try:
-        entries = list(iter_jsonl(filepath))
+        for entry in iter_jsonl(filepath):
+            process_entry(
+                entry,
+                messages,
+                metadata,
+                stats,
+                anonymizer,
+                include_thinking,
+                pending_tool_results=pending_tool_results,
+                pending_tool_uses=pending_tool_uses,
+            )
     except OSError:
         return None
-
-    tool_result_map = build_tool_result_map(entries, anonymizer)
-    for entry in entries:
-        process_entry(
-            entry,
-            messages,
-            metadata,
-            stats,
-            anonymizer,
-            include_thinking,
-            tool_result_map,
-        )
 
     return make_session_result(metadata, messages, stats)
 
@@ -394,16 +406,9 @@ def parse_subagent_session(
     if not subagent_dir.is_dir():
         return None
 
-    timed_entries: list[tuple[str, dict[str, Any]]] = []
-    for sa_file in sorted(subagent_dir.glob("agent-*.jsonl")):
-        for entry in iter_jsonl(sa_file):
-            ts = entry.get("timestamp", "")
-            timed_entries.append((ts if isinstance(ts, str) else "", entry))
-
-    if not timed_entries:
+    subagent_files = sorted(subagent_dir.glob("agent-*.jsonl"))
+    if not subagent_files:
         return None
-
-    timed_entries.sort(key=lambda pair: pair[0])
 
     messages: list[dict[str, Any]] = []
     metadata = {
@@ -416,19 +421,28 @@ def parse_subagent_session(
         "end_time": None,
     }
     stats = make_stats()
+    pending_tool_results: dict[str, dict[str, Any]] = {}
+    pending_tool_uses: dict[str, list[dict[str, Any]]] = {}
 
-    entries = [entry for _ts, entry in timed_entries]
-    tool_result_map = build_tool_result_map(entries, anonymizer)
-    for entry in entries:
-        process_entry(
-            entry,
-            messages,
-            metadata,
-            stats,
-            anonymizer,
-            include_thinking,
-            tool_result_map,
-        )
+    try:
+        saw_entry = False
+        for entry in iter_sorted_subagent_entries(subagent_files):
+            saw_entry = True
+            process_entry(
+                entry,
+                messages,
+                metadata,
+                stats,
+                anonymizer,
+                include_thinking,
+                pending_tool_results=pending_tool_results,
+                pending_tool_uses=pending_tool_uses,
+            )
+    except OSError:
+        return None
+
+    if not saw_entry:
+        return None
 
     metadata["session_id"] = resolve_subagent_session_id(session_dir, metadata["session_id"])
     return make_session_result(metadata, messages, stats)
@@ -441,6 +455,29 @@ def resolve_subagent_session_id(session_dir: Path, session_id: str) -> str:
     return session_id
 
 
+def _entry_sort_timestamp(entry: dict[str, Any]) -> str:
+    timestamp = entry.get("timestamp", "")
+    return timestamp if isinstance(timestamp, str) else ""
+
+
+def iter_sorted_subagent_entries(subagent_files: list[Path]) -> Iterator[dict[str, Any]]:
+    heap: list[tuple[str, int, dict[str, Any], Iterator[dict[str, Any]]]] = []
+
+    for file_index, sa_file in enumerate(subagent_files):
+        entries = iter_jsonl(sa_file)
+        first_entry = next(entries, None)
+        if first_entry is None:
+            continue
+        heapq.heappush(heap, (_entry_sort_timestamp(first_entry), file_index, first_entry, entries))
+
+    while heap:
+        _timestamp, file_index, entry, entries = heapq.heappop(heap)
+        yield entry
+        next_entry = next(entries, None)
+        if next_entry is not None:
+            heapq.heappush(heap, (_entry_sort_timestamp(next_entry), file_index, next_entry, entries))
+
+
 def process_entry(
     entry: dict[str, Any],
     messages: list[dict[str, Any]],
@@ -449,6 +486,8 @@ def process_entry(
     anonymizer: Anonymizer,
     include_thinking: bool,
     tool_result_map: dict[str, dict] | None = None,
+    pending_tool_results: dict[str, dict[str, Any]] | None = None,
+    pending_tool_uses: dict[str, list[dict[str, Any]]] | None = None,
 ) -> None:
     entry_type = entry.get("type")
 
@@ -461,6 +500,7 @@ def process_entry(
     timestamp = normalize_timestamp(entry.get("timestamp"))
 
     if entry_type == "user":
+        _attach_claude_tool_results(entry, anonymizer, pending_tool_results, pending_tool_uses)
         content = extract_user_content(entry, anonymizer)
         if content is not None:
             messages.append({"role": "user", "content": content, "timestamp": timestamp})
@@ -468,7 +508,14 @@ def process_entry(
             update_time_bounds(metadata, timestamp)
 
     elif entry_type == "assistant":
-        msg = extract_assistant_content(entry, anonymizer, include_thinking, tool_result_map)
+        msg = extract_assistant_content(
+            entry,
+            anonymizer,
+            include_thinking,
+            tool_result_map,
+            pending_tool_results,
+            pending_tool_uses,
+        )
         if msg:
             if metadata["model"] is None:
                 metadata["model"] = entry.get("message", {}).get("model")
@@ -503,6 +550,8 @@ def extract_assistant_content(
     anonymizer: Anonymizer,
     include_thinking: bool,
     tool_result_map: dict[str, dict] | None = None,
+    pending_tool_results: dict[str, dict[str, Any]] | None = None,
+    pending_tool_uses: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any] | None:
     msg_data = entry.get("message", {})
     content_blocks = msg_data.get("content", [])
@@ -530,11 +579,17 @@ def extract_assistant_content(
                 "tool": block.get("name"),
                 "input": parse_tool_input(block.get("name"), block.get("input", {}), anonymizer),
             }
+            tool_use_id = block.get("id")
             if tool_result_map is not None:
-                result = tool_result_map.get(block.get("id", ""))
+                result = tool_result_map.get(tool_use_id or "")
                 if result:
-                    tu["output"] = result["output"]
-                    tu["status"] = result["status"]
+                    _apply_claude_tool_result(tu, result)
+            elif isinstance(tool_use_id, str) and tool_use_id:
+                pending_result = None if pending_tool_results is None else pending_tool_results.pop(tool_use_id, None)
+                if pending_result is not None:
+                    _apply_claude_tool_result(tu, pending_result)
+                elif pending_tool_uses is not None:
+                    pending_tool_uses.setdefault(tool_use_id, []).append(tu)
             tool_uses.append(tu)
 
     if not text_parts and not tool_uses and not thinking_parts:
@@ -548,6 +603,45 @@ def extract_assistant_content(
     if tool_uses:
         msg["tool_uses"] = tool_uses
     return msg
+
+
+def _apply_claude_tool_result(tool_use: dict[str, Any], result: dict[str, Any]) -> None:
+    if result.get("output"):
+        tool_use["output"] = result["output"]
+    if result.get("status"):
+        tool_use["status"] = result["status"]
+
+
+def _attach_claude_tool_results(
+    entry: dict[str, Any],
+    anonymizer: Anonymizer,
+    pending_tool_results: dict[str, dict[str, Any]] | None,
+    pending_tool_uses: dict[str, list[dict[str, Any]]] | None,
+) -> None:
+    if pending_tool_results is None and pending_tool_uses is None:
+        return
+
+    content_blocks = entry.get("message", {}).get("content", [])
+    if not isinstance(content_blocks, list):
+        return
+
+    for block in content_blocks:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        tool_use_id = block.get("tool_use_id")
+        if not isinstance(tool_use_id, str) or not tool_use_id:
+            continue
+
+        result = {
+            "output": build_tool_result_output(block, entry, anonymizer),
+            "status": "error" if block.get("is_error") else "success",
+        }
+        matched_tool_uses = [] if pending_tool_uses is None else pending_tool_uses.pop(tool_use_id, [])
+        if matched_tool_uses:
+            for tool_use in matched_tool_uses:
+                _apply_claude_tool_result(tool_use, result)
+        elif pending_tool_results is not None:
+            pending_tool_results[tool_use_id] = result
 
 
 def build_project_name(dir_name: str) -> str:
