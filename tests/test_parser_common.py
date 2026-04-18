@@ -1,6 +1,7 @@
 """Tests for shared parser helpers."""
 
-from dataclaw.parsers.common import normalize_timestamp, parse_tool_input
+from dataclaw import _json as json
+from dataclaw.parsers.common import load_json_field, normalize_timestamp, parse_tool_input
 
 
 class TestNormalizeTimestamp:
@@ -141,3 +142,16 @@ class TestParseToolInput:
         result = parse_tool_input("Read", "just a string", mock_anonymizer)
         assert isinstance(result, dict)
         assert "raw" in result
+
+
+class TestLoadJsonField:
+    def test_surrogate_escapes_are_sanitized_for_export(self):
+        value = '{"output":"prefix ' + "\\udcbf" + " middle " + "\\ud83d" + '","nested":["' + "\\udce1" + '"]}'
+
+        result = load_json_field(value)
+
+        assert result == {
+            "output": r"prefix \xbf middle \ud83d",
+            "nested": [r"\xe1"],
+        }
+        assert json.dumps(result)

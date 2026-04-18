@@ -1,3 +1,4 @@
+import json as stdlib_json
 import logging
 from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
@@ -85,6 +86,32 @@ def safe_int(value: Any) -> int:
     return 0
 
 
+def _escape_invalid_unicode_text(text: str) -> str:
+    if not any(0xD800 <= ord(ch) <= 0xDFFF for ch in text):
+        return text
+
+    parts: list[str] = []
+    for ch in text:
+        code = ord(ch)
+        if 0xDC80 <= code <= 0xDCFF:
+            parts.append(f"\\x{code - 0xDC00:02x}")
+        elif 0xD800 <= code <= 0xDFFF:
+            parts.append(f"\\u{code:04x}")
+        else:
+            parts.append(ch)
+    return "".join(parts)
+
+
+def _sanitize_json_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _escape_invalid_unicode_text(value)
+    if isinstance(value, dict):
+        return {_escape_invalid_unicode_text(str(k)): _sanitize_json_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_json_value(item) for item in value]
+    return value
+
+
 def load_json_field(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -92,8 +119,11 @@ def load_json_field(value: Any) -> dict[str, Any]:
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError as e:
-            logger.warning("Failed to parse JSON field: %s", e)
-            return {}
+            try:
+                parsed = _sanitize_json_value(stdlib_json.loads(value))
+            except stdlib_json.JSONDecodeError:
+                logger.warning("Failed to parse JSON field: %s", e)
+                return {}
         if isinstance(parsed, dict):
             return parsed
     return {}

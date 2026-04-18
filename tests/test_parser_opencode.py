@@ -299,3 +299,59 @@ class TestOpenCodeProjects:
 
         assert len(sessions) == 2
         assert connect_calls == 2
+
+    def test_parse_opencode_surrogate_escaped_tool_output(self, tmp_path, monkeypatch, mock_anonymizer):
+        disable_other_providers(monkeypatch, tmp_path, keep={"opencode"})
+        db_path = tmp_path / "opencode.db"
+        conn = write_opencode_db(db_path)
+
+        session_id = "ses_surrogate"
+        cwd = "/Users/testuser/work/repo"
+        conn.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated) VALUES (?, ?, ?, ?)",
+            (session_id, cwd, 1706000000000, 1706000005000),
+        )
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+            (
+                "msg_user",
+                session_id,
+                1706000001000,
+                json.dumps({"role": "user", "model": {"providerID": "openai", "modelID": "gpt-5.3-codex"}}),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+            (
+                "msg_assistant",
+                session_id,
+                1706000002000,
+                json.dumps({"role": "assistant", "model": {"providerID": "openai", "modelID": "gpt-5.3-codex"}}),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO part (id, message_id, time_created, data) VALUES (?, ?, ?, ?)",
+            ("prt_user", "msg_user", 1706000001001, json.dumps({"type": "text", "text": "show output"})),
+        )
+        conn.execute(
+            "INSERT INTO part (id, message_id, time_created, data) VALUES (?, ?, ?, ?)",
+            (
+                "prt_tool",
+                "msg_assistant",
+                1706000002001,
+                '{"type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"python bad.py"},"output":"prefix '
+                + "\\udcbf"
+                + ' suffix"}}',
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr("dataclaw.parsers.opencode.OPENCODE_DB_PATH", db_path)
+        monkeypatch.setattr("dataclaw.parsers.opencode._PROJECT_INDEX", {})
+
+        sessions = parse_project_sessions(cwd, mock_anonymizer, source="opencode")
+
+        assert len(sessions) == 1
+        assert sessions[0]["messages"][1]["tool_uses"][0]["output"] == {"text": r"prefix \xbf suffix"}
+        assert json.dumps(sessions[0])
